@@ -1378,9 +1378,9 @@ class PackRealFastFourierCoefficientsTransform(Transform):
     codomain = constraints.independent(constraints.complex, 1)
 
     def __init__(self, transform_shape: tuple = None) -> None:
-        assert transform_shape is None or len(transform_shape) == 1, (
-            "Packing Fourier coefficients is only implemented for vectors."
-        )
+        assert (
+            transform_shape is None or len(transform_shape) == 1
+        ), "Packing Fourier coefficients is only implemented for vectors."
         self.shape = transform_shape
 
     def tree_flatten(self):
@@ -1388,17 +1388,17 @@ class PackRealFastFourierCoefficientsTransform(Transform):
 
     def forward_shape(self, shape: tuple) -> tuple:
         *batch_shape, n = shape
-        assert self.shape is None or self.shape == (n,), (
-            f"`shape` must be `None` or `{self.shape}. Got `{shape}`."
-        )
+        assert self.shape is None or self.shape == (
+            n,
+        ), f"`shape` must be `None` or `{self.shape}. Got `{shape}`."
         n_rfft = n // 2 + 1
         return (*batch_shape, n_rfft)
 
     def inverse_shape(self, shape: tuple) -> tuple:
         *batch_shape, n_rfft = shape
-        assert self.shape is not None, (
-            "Shape must be specified in `__init__` for inverse transform."
-        )
+        assert (
+            self.shape is not None
+        ), "Shape must be specified in `__init__` for inverse transform."
         (n,) = self.shape
         assert n_rfft == n // 2 + 1
         return (*batch_shape, n)

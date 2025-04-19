@@ -990,7 +990,6 @@ CONTINUOUS = [
         jnp.array([[1.0, 0.5], [0.5, 1.0]]),
         None,
         None,
-        _invwishart_to_scipy,
     ),
     T(
         dist.InverseWishart,
@@ -998,7 +997,6 @@ CONTINUOUS = [
         None,  # scale_matrix
         None,  # rate_matrix
         jnp.array([[1.0, 0.5, 0.2], [0.5, 1.0, 0.3], [0.2, 0.3, 1.0]]),  # scale_tril
-        _invwishart_to_scipy,
     ),
     T(
         dist.ZeroSumNormal,

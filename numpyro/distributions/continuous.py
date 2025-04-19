@@ -25,7 +25,6 @@
 # ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
 
-import math
 
 import numpy as np
 
@@ -3268,11 +3267,11 @@ class InverseWishart(TransformedDistribution):
         # following for the scale matrix, ordered by computational efficiency:
         # scale_tril, scale_matrix, rate_matrix
         if scale_tril is not None:
-            self.scale_tril = scale_tril
+            self._scale_tril = scale_tril
         elif scale_matrix is not None:
-            self.scale_matrix = scale_matrix
+            self._scale_matrix = scale_matrix
         elif rate_matrix is not None:
-            self.rate_matrix = rate_matrix
+            self._rate_matrix = rate_matrix
         else:
             raise ValueError(
                 "One of scale_matrix, rate_matrix, or scale_tril must be specified."
@@ -3282,12 +3281,12 @@ class InverseWishart(TransformedDistribution):
 
         # Initialize the inverse Wishart by transforming from a Wishart distribution
         # If X ~ Wishart(df, Psi^-1), then X^-1 ~ InvWishart(df, Psi)
-        if hasattr(self, "scale_matrix"):
-            wishart = WishartCholesky(df, rate_matrix=self.scale_matrix)
-        elif hasattr(self, "rate_matrix"):
-            wishart = WishartCholesky(df, scale_matrix=self.rate_matrix)
-        else:  # hasattr(self, "scale_tril")
-            wishart = WishartCholesky(df, scale_tril=jnp.linalg.inv(self.scale_tril))
+        if hasattr(self, "_scale_matrix"):
+            wishart = WishartCholesky(df, rate_matrix=self._scale_matrix)
+        elif hasattr(self, "_rate_matrix"):
+            wishart = WishartCholesky(df, scale_matrix=self._rate_matrix)
+        else:  # hasattr(self, "_scale_tril")
+            wishart = WishartCholesky(df, scale_tril=jnp.linalg.inv(self._scale_tril))
 
         from numpyro.distributions import transforms as distribution_transforms
 
@@ -3304,26 +3303,32 @@ class InverseWishart(TransformedDistribution):
 
     @lazy_property
     def scale_matrix(self):
-        if hasattr(self, "scale_tril"):
-            scale_tril = self.scale_tril
+        if hasattr(self, "_scale_tril"):
+            scale_tril = self._scale_tril
             return jnp.matmul(scale_tril, jnp.swapaxes(scale_tril, -2, -1))
-        else:
-            return jnp.linalg.inv(self.rate_matrix)
+        elif hasattr(self, "_rate_matrix"):
+            return jnp.linalg.inv(self._rate_matrix)
+        else:  # We have _scale_matrix directly
+            return self._scale_matrix
 
     @lazy_property
     def rate_matrix(self):
-        if hasattr(self, "scale_tril"):
-            scale_tril_inv = jnp.linalg.inv(self.scale_tril)
+        if hasattr(self, "_scale_tril"):
+            scale_tril_inv = jnp.linalg.inv(self._scale_tril)
             return jnp.matmul(jnp.swapaxes(scale_tril_inv, -2, -1), scale_tril_inv)
-        else:
-            return jnp.linalg.inv(self.scale_matrix)
+        elif hasattr(self, "_scale_matrix"):
+            return jnp.linalg.inv(self._scale_matrix)
+        else:  # We have _rate_matrix directly
+            return self._rate_matrix
 
     @lazy_property
     def scale_tril(self):
-        if hasattr(self, "scale_matrix"):
-            return jnp.linalg.cholesky(self.scale_matrix)
-        else:
-            return jnp.linalg.cholesky(jnp.linalg.inv(self.rate_matrix))
+        if hasattr(self, "_scale_tril"):
+            return self._scale_tril
+        elif hasattr(self, "_scale_matrix"):
+            return jnp.linalg.cholesky(self._scale_matrix)
+        else:  # hasattr(self, "_rate_matrix")
+            return jnp.linalg.cholesky(jnp.linalg.inv(self._rate_matrix))
 
     @lazy_property
     def mean(self):
@@ -3336,13 +3341,25 @@ class InverseWishart(TransformedDistribution):
 
     @lazy_property
     def variance(self):
-        # The variance of an inverse Wishart is complex and involves higher-order moments
-        # For now, we return a simplified form
+        # For an InverseWishart distribution with scale matrix Psi and degrees of freedom nu,
+        # the variance of each element (i,j) of the resulting matrix is:
+        # Var(X_{ij}) = (Psi_{ij}^2 + Psi_{ii}*Psi_{jj})/(nu - dim - 1)^2 * (nu - dim + 1)
         dim = self.scale_matrix.shape[-1]
-        denominator1 = jnp.clip(self.df - dim - 1, a_min=1e-8)
-        denominator2 = jnp.clip(self.df - dim - 3, a_min=1e-8)
-        scalar = 2 / (denominator1 * denominator2)
-        return jnp.ones_like(self.scale_matrix) * scalar
+
+        # Safely handle cases where df is too small (variance doesn't exist when df <= dim+3)
+        denominator = jnp.maximum(self.df - dim - 1, 1e-8)
+        factor = (self.df - dim + 1) / (denominator * denominator)
+
+        # Get diagonal elements for computing the variance
+        diag_elements = jnp.diagonal(self.scale_matrix, axis1=-2, axis2=-1)
+
+        # Compute variance for each element
+        i, j = jnp.meshgrid(jnp.arange(dim), jnp.arange(dim), indexing="ij")
+        psi_ii = diag_elements[..., i]
+        psi_jj = diag_elements[..., j]
+        psi_ij = self.scale_matrix
+
+        return (psi_ij**2 + psi_ii * psi_jj) * factor
 
     @staticmethod
     def infer_shapes(df=(), scale_matrix=None, rate_matrix=None, scale_tril=None):
@@ -3356,12 +3373,18 @@ class InverseWishart(TransformedDistribution):
 
     def entropy(self):
         """Compute the entropy of the inverse Wishart distribution."""
+        from jax.lax import lgamma
+
         dim = self.scale_matrix.shape[-1]
         df = self.df
-        entropy = -math.lgamma(df / 2) * dim
-        entropy += dim * (df / 2) + dim * (dim + 1) / 4 * math.log(2)
+        entropy = -lgamma(df / 2) * dim
+        entropy += dim * (df / 2) + dim * (dim + 1) / 4 * jnp.log(2)
         entropy -= dim / 2 * jnp.log(jnp.linalg.det(self.scale_matrix))
-        entropy += (df + dim + 1) / 2 * dim * math.log(2)
-        for i in range(1, dim + 1):
-            entropy += math.lgamma((df + dim + 1 - i) / 2)
+        entropy += (df + dim + 1) / 2 * dim * jnp.log(2)
+
+        # Use vectorized operations for the sum of gamma functions
+        i_range = jnp.arange(1, dim + 1)
+        gamma_terms = lgamma((df + dim + 1 - i_range) / 2)
+        entropy += jnp.sum(gamma_terms)
+
         return entropy
