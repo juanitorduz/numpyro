@@ -447,6 +447,28 @@ class CholeskyTransform(ParameterFreeTransform):
         )
 
 
+class InverseMatrixTransform(ParameterFreeTransform):
+    r"""
+    Transform via the mapping :math:`y = x^{-1}`, where `x` is a
+    positive definite matrix.
+    """
+
+    domain = constraints.positive_definite
+    codomain = constraints.positive_definite
+
+    def __call__(self, x):
+        return jnp.linalg.inv(x)
+
+    def _inverse(self, y):
+        return jnp.linalg.inv(y)
+
+    def log_abs_det_jacobian(self, x, y, intermediates=None):
+        # |det(dy/dx)| = |det(y)|^(n+1)
+        # log|det(dy/dx)| = (n+1) * log|det(y)|
+        n = jnp.shape(x)[-1]
+        return -(n + 1) * jnp.linalg.slogdet(x)[1]
+
+
 class CorrCholeskyTransform(ParameterFreeTransform):
     r"""
     Transforms a unconstrained real vector :math:`x` with length :math:`D*(D-1)/2` into the

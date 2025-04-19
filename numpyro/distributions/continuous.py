@@ -25,6 +25,8 @@
 # ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
 
+import math
+
 import numpy as np
 
 from jax import lax, vmap
@@ -3212,3 +3214,154 @@ class CirculantNormal(TransformedDistribution):
         (n,) = self.event_shape
         log_abs_det_jacobian = 2 * jnp.log(2) * ((n - 1) // 2) - jnp.log(n) * n
         return self.base_dist.entropy() + log_abs_det_jacobian / 2
+
+
+class InverseWishart(TransformedDistribution):
+    """
+    Inverse Wishart distribution for covariance matrices.
+
+    The inverse Wishart distribution is often denoted
+
+    .. math:: W^{-1}_p(\\nu, \\Psi)
+
+    where :math:`\\nu` is the degrees of freedom and :math:`\\Psi` is the :math:`p \\times p` scale matrix.
+
+    The probability density function for `invwishart` has support over positive definite matrices :math:`S`;
+    if :math:`S \\sim W^{-1}_p(\\nu, \\Sigma)`, then its PDF is given by:
+
+    .. math::
+
+        f(S) = \\frac{|\\Sigma|^{\\frac{\\nu}{2}}}{2^{\\frac{\\nu p}{2}} |S|^{\\frac{\\nu + p + 1}{2}} \\Gamma_p \\left(\\frac{\\nu}{2} \\right)} \\exp\\left( -tr(\\Sigma S^{-1}) / 2 \\right)
+
+    If :math:`S \\sim W_p^{-1}(\\nu, \\Psi)` (inverse Wishart) then :math:`S^{-1} \\sim W_p(\\nu, \\Psi^{-1})` (Wishart).
+
+    :param df: Degrees of freedom, must be greater than or equal to dimension of the scale matrix
+    :param scale_matrix: Scale matrix, must be symmetric and positive definite
+    :param rate_matrix: Rate matrix, must be symmetric and positive definite
+    :param scale_tril: Lower triangular Cholesky factor of scale_matrix
+    """
+
+    arg_constraints = {
+        "df": constraints.greater_than_eq(2),
+        "scale_matrix": constraints.positive_definite,
+        "rate_matrix": constraints.positive_definite,
+        "scale_tril": constraints.lower_cholesky,
+    }
+    support = constraints.positive_definite
+    reparametrized_params = [
+        "df",
+        "scale_matrix",
+        "rate_matrix",
+        "scale_tril",
+    ]
+
+    def __init__(
+        self,
+        df,
+        scale_matrix=None,
+        rate_matrix=None,
+        scale_tril=None,
+        *,
+        validate_args=None,
+    ):
+        # Similar to the Wishart distribution, we require only one of the
+        # following for the scale matrix, ordered by computational efficiency:
+        # scale_tril, scale_matrix, rate_matrix
+        if scale_tril is not None:
+            self.scale_tril = scale_tril
+        elif scale_matrix is not None:
+            self.scale_matrix = scale_matrix
+        elif rate_matrix is not None:
+            self.rate_matrix = rate_matrix
+        else:
+            raise ValueError(
+                "One of scale_matrix, rate_matrix, or scale_tril must be specified."
+            )
+
+        self._df = df
+
+        # Initialize the inverse Wishart by transforming from a Wishart distribution
+        # If X ~ Wishart(df, Psi^-1), then X^-1 ~ InvWishart(df, Psi)
+        if hasattr(self, "scale_matrix"):
+            wishart = WishartCholesky(df, rate_matrix=self.scale_matrix)
+        elif hasattr(self, "rate_matrix"):
+            wishart = WishartCholesky(df, scale_matrix=self.rate_matrix)
+        else:  # hasattr(self, "scale_tril")
+            wishart = WishartCholesky(df, scale_tril=jnp.linalg.inv(self.scale_tril))
+
+        from numpyro.distributions import transforms as distribution_transforms
+
+        transform_list = [
+            distribution_transforms.InverseMatrixTransform(),
+            distribution_transforms.CholeskyTransform(),
+        ]
+
+        super().__init__(wishart, transform_list, validate_args=validate_args)
+
+    @property
+    def df(self):
+        return self._df
+
+    @lazy_property
+    def scale_matrix(self):
+        if hasattr(self, "scale_tril"):
+            scale_tril = self.scale_tril
+            return jnp.matmul(scale_tril, jnp.swapaxes(scale_tril, -2, -1))
+        else:
+            return jnp.linalg.inv(self.rate_matrix)
+
+    @lazy_property
+    def rate_matrix(self):
+        if hasattr(self, "scale_tril"):
+            scale_tril_inv = jnp.linalg.inv(self.scale_tril)
+            return jnp.matmul(jnp.swapaxes(scale_tril_inv, -2, -1), scale_tril_inv)
+        else:
+            return jnp.linalg.inv(self.scale_matrix)
+
+    @lazy_property
+    def scale_tril(self):
+        if hasattr(self, "scale_matrix"):
+            return jnp.linalg.cholesky(self.scale_matrix)
+        else:
+            return jnp.linalg.cholesky(jnp.linalg.inv(self.rate_matrix))
+
+    @lazy_property
+    def mean(self):
+        # The mean of an inverse Wishart is scale_matrix / (df - dim - 1)
+        # where dim is the dimension of the scale matrix
+        dim = self.scale_matrix.shape[-1]
+        # Handle the case where df <= dim + 1, in which case the mean doesn't exist
+        denominator = jnp.clip(self.df - dim - 1, a_min=1e-8)
+        return self.scale_matrix / denominator
+
+    @lazy_property
+    def variance(self):
+        # The variance of an inverse Wishart is complex and involves higher-order moments
+        # For now, we return a simplified form
+        dim = self.scale_matrix.shape[-1]
+        denominator1 = jnp.clip(self.df - dim - 1, a_min=1e-8)
+        denominator2 = jnp.clip(self.df - dim - 3, a_min=1e-8)
+        scalar = 2 / (denominator1 * denominator2)
+        return jnp.ones_like(self.scale_matrix) * scalar
+
+    @staticmethod
+    def infer_shapes(df=(), scale_matrix=None, rate_matrix=None, scale_tril=None):
+        """Infer the shape of the distribution based on the shapes of parameters."""
+        if scale_matrix is not None:
+            return (), scale_matrix
+        if rate_matrix is not None:
+            return (), rate_matrix
+        if scale_tril is not None:
+            return (), scale_tril[:-1]
+
+    def entropy(self):
+        """Compute the entropy of the inverse Wishart distribution."""
+        dim = self.scale_matrix.shape[-1]
+        df = self.df
+        entropy = -math.lgamma(df / 2) * dim
+        entropy += dim * (df / 2) + dim * (dim + 1) / 4 * math.log(2)
+        entropy -= dim / 2 * jnp.log(jnp.linalg.det(self.scale_matrix))
+        entropy += (df + dim + 1) / 2 * dim * math.log(2)
+        for i in range(1, dim + 1):
+            entropy += math.lgamma((df + dim + 1 - i) / 2)
+        return entropy

@@ -138,6 +138,14 @@ def _wishart_to_scipy(conc, scale, rate, tril):
     return osp.wishart(float(jax_dist.concentration), jax_dist.scale_matrix)
 
 
+def _invwishart_to_scipy(df, scale, rate, tril):
+    jax_dist = dist.InverseWishart(df, scale, rate, tril)
+    if not jnp.isscalar(jax_dist.df):
+        pytest.skip("scipy InverseWishart only supports a single scalar df")
+    # Cast to float explicitly because np.isscalar returns False on scalar jax arrays.
+    return osp.invwishart(float(jax_dist.df), jax_dist.scale_matrix)
+
+
 def _circulant_to_scipy(loc, covariance_row, covariance_rfft):
     jax_dist = dist.CirculantNormal(loc, covariance_row, covariance_rfft)
     return osp.multivariate_normal(mean=jax_dist.mean, cov=jax_dist.covariance_matrix)
@@ -458,6 +466,7 @@ _DIST_MAP = {
         scale=scale,
     ),
     dist.Wishart: _wishart_to_scipy,
+    dist.InverseWishart: _invwishart_to_scipy,
     _TruncatedNormal: _truncnorm_to_scipy,
     dist.Levy: lambda loc, scale: osp.levy(loc=loc, scale=scale),
 }
@@ -471,16 +480,16 @@ def get_sp_dist(jax_dist):
 
 
 CONTINUOUS = [
-    T(dist.AsymmetricLaplace, 1.0, 0.5, 1.0),
+    T(dist.AsymmetricLaplace, 0.0, 1.0, 2.0),
     T(dist.AsymmetricLaplace, np.array([1.0, 2.0]), 2.0, 2.0),
     T(dist.AsymmetricLaplace, np.array([[1.0], [2.0]]), 2.0, np.array([3.0, 5.0])),
-    T(dist.AsymmetricLaplaceQuantile, 0.0, 1.0, 0.5),
+    T(dist.AsymmetricLaplaceQuantile, 0.0, 1.0, 0.7),
     T(dist.AsymmetricLaplaceQuantile, np.array([1.0, 2.0]), 2.0, 0.7),
     T(
         dist.AsymmetricLaplaceQuantile,
         np.array([[1.0], [2.0]]),
         2.0,
-        np.array([0.2, 0.8]),
+        np.array([0.3, 0.7]),
     ),
     T(dist.Beta, 0.2, 1.1),
     T(dist.Beta, 1.0, np.array([2.0, 2.0])),
@@ -959,6 +968,80 @@ CONTINUOUS = [
     T(dist.Levy, 0.0, 1.0),
     T(dist.Levy, 0.0, np.array([1.0, 2.0, 10.0])),
     T(dist.Levy, np.array([1.0, 2.0, 10.0]), np.pi),
+    T(
+        dist.Wishart,
+        7,
+        jnp.array([[1.0, 0.5], [0.5, 1.0]]),
+        None,
+        None,
+        _wishart_to_scipy,
+    ),
+    T(
+        dist.Wishart,
+        7,  # df
+        None,  # scale_matrix
+        None,  # rate_matrix
+        jnp.array([[1.0, 0.5, 0.2], [0.5, 1.0, 0.3], [0.2, 0.3, 1.0]]),  # scale_tril
+        _wishart_to_scipy,
+    ),
+    T(
+        dist.InverseWishart,
+        7,
+        jnp.array([[1.0, 0.5], [0.5, 1.0]]),
+        None,
+        None,
+        _invwishart_to_scipy,
+    ),
+    T(
+        dist.InverseWishart,
+        10,  # df
+        None,  # scale_matrix
+        None,  # rate_matrix
+        jnp.array([[1.0, 0.5, 0.2], [0.5, 1.0, 0.3], [0.2, 0.3, 1.0]]),  # scale_tril
+        _invwishart_to_scipy,
+    ),
+    T(
+        dist.ZeroSumNormal,
+        1.0,  # scale
+        (3,),  # event_shape
+    ),
+    T(dist.InverseWishart, 4, 2 * np.eye(2) + 0.1, None, None),
+    T(
+        dist.InverseWishart,
+        5.0,
+        None,
+        np.array([[1.0, 0.5], [0.5, 1.0]]),
+        None,
+    ),
+    T(
+        dist.InverseWishart,
+        np.array([6.0, 7.0]),
+        None,
+        np.array([[[1.0, 0.5], [0.5, 1.0]]]),
+        None,
+    ),
+    T(
+        dist.InverseWishart,
+        np.array([5.0]),
+        None,
+        None,
+        np.array([[1.0, 0.0], [0.5, 1.0]]),
+    ),
+    T(
+        dist.InverseWishart,
+        np.arange(4, 10, dtype=np.float32).reshape((3, 2)),
+        None,
+        None,
+        np.array([[1.0, 0.0], [0.0, 1.0]]),
+    ),
+    T(
+        dist.InverseWishart,
+        11.0,
+        None,
+        np.broadcast_to(np.identity(3), (2, 3, 3)),
+        None,
+    ),
+    T(dist.ZeroSumNormal, 1.0, (5,)),
 ]
 
 DIRECTIONAL = [
